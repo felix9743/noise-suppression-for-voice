@@ -22,48 +22,49 @@ jobs:
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         config:
           - {
-            name: "Windows MSVC",
-            os: windows-2019,
+            name: "Windows",
+            os: windows-latest,
             cc: "cl", cxx: "cl",
             build_params: "--config Release",
-            artifact_prefix: "win"
+            artifact_prefix: "Windows"
           }
           - {
-            name: "Ubuntu Latest GCC",
+            name: "Linux",
             os: ubuntu-latest,
             cc: "gcc", cxx: "g++",
             build_params: "",
-            artifact_prefix: "linux"
+            artifact_prefix: "Linux"
           }
           - {
-            name: "macOS Latest Clang",
+            name: "macOS",
             os: macos-latest,
             cc: "clang", cxx: "clang++",
             build_params: "",
-            artifact_prefix: "macos",
+            artifact_prefix: "macOS",
           }
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install Ubuntu dependencies
-        if: ${{ matrix.config.os == 'ubuntu-latest' }}
+        if: runner.os == 'Linux'
         run: |
+          sudo apt-get update
           sudo apt-get install --no-install-recommends \
-              libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev
+              libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+              libxinerama-dev libxrandr-dev libxrender-dev
 
-      - name: ccache
-        # TODO: Make MSVC build work with ccache
-        if: ${{ matrix.config.os != 'windows-latest' }}
-        uses: hendrikmuhs/ccache-action@v1.2.2
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
         with:
-          key: ${{ matrix.config.os }}
+          key: ${{ matrix.config.os }}-${{ matrix.config.cc }}
           variant: ccache
           max-size: 100M
+          save: true 
 
       - name: Configure
         env:
@@ -71,7 +72,9 @@ jobs:
           CXX: ${{ matrix.config.cxx }}
           CMAKE_OSX_ARCHITECTURES: "x86_64;arm64"
         run: >-
-          cmake -B${{runner.workspace}}/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake -B${{runner.workspace}}/build -DCMAKE_BUILD_TYPE=Release 
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
           -DBUILD_LADSPA_PLUGIN=1
           -DBUILD_VST_PLUGIN=1
           -DBUILD_VST3_PLUGIN=${{env.full_build}}
@@ -89,14 +92,41 @@ jobs:
         working-directory: ${{runner.workspace}}/build/src/common/
         run: ctest
 
-      - name: Upload artifacts
-        id: upload-artifacts
-        uses: actions/upload-artifact@v3
+      - name: Upload Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.config.artifact_prefix }}-rnnoise
+          name: build-${{ matrix.config.artifact_prefix }}
           path: |
             ${{runner.workspace}}/build/bin
             !**/*.lib
             !**/*.pdb
-          retention-days: 5
-          if-no-files-found: error
+            !**/*.exp
+          retention-days: 1
+
+  bundle:
+    name: Create Final Bundle
+    needs: build
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-builds
+          pattern: build-*
+          merge-multiple: false
+
+      - name: Organize and Rename
+        run: |
+          mkdir release
+          mv all-builds/build-Windows release/Windows
+          mv all-builds/build-Linux release/Linux
+          mv all-builds/build-macOS release/macOS
+
+      - name: Upload Combined ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: RNNoise-Plugins-Full-Package
+          path: release/
+          retention-days: 7
